@@ -1,0 +1,10 @@
+.DS_Store
+.idea/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+__pycache__/
+/private/
+

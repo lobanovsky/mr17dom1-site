@@ -1,0 +1,73 @@
+name: Validate and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Check local assets
+        run: python3 scripts/check-site.py
+      - name: Build Nginx image
+        run: docker build -t mr17dom1-site:test .
+      - name: Smoke test
+        run: bash scripts/smoke-test.sh mr17dom1-site:test
+      - name: Validate Traefik Compose configuration
+        env:
+          SITE_IMAGE: mr17dom1-site:test
+        run: docker compose --env-file .env.example config --quiet
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: mr17dom1-site-production
+      cancel-in-progress: false
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_BASE: ${{ secrets.DEPLOY_BASE }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Deploy release over SSH
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${SSH_PRIVATE_KEY:?Configure DEPLOY_SSH_KEY}"
+          : "${SSH_KNOWN_HOSTS:?Configure DEPLOY_KNOWN_HOSTS}"
+          : "${DEPLOY_HOST:?Configure DEPLOY_HOST}"
+          : "${DEPLOY_PORT:?Configure DEPLOY_PORT}"
+          : "${DEPLOY_USER:?Configure DEPLOY_USER}"
+          : "${DEPLOY_BASE:?Configure DEPLOY_BASE}"
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9.-]+$ ]]
+          [[ "$DEPLOY_PORT" =~ ^[0-9]+$ ]]
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          [[ "$DEPLOY_BASE" =~ ^/[a-zA-Z0-9_/-]+$ ]]
+          umask 077
+          key="$RUNNER_TEMP/deploy-key"
+          hosts="$RUNNER_TEMP/deploy-known-hosts"
+          trap 'rm -f "$key" "$hosts"' EXIT
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$hosts"
+          ssh_cmd=(ssh -i "$key" -p "$DEPLOY_PORT" -o BatchMode=yes
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=$hosts" -o ConnectTimeout=15
+            "$DEPLOY_USER@$DEPLOY_HOST")
+          release="$DEPLOY_BASE/releases/$GITHUB_SHA"
+          "${ssh_cmd[@]}" "mkdir -p '$release'"
+          git archive HEAD | "${ssh_cmd[@]}" "tar -xf - -C '$release'"
+          "${ssh_cmd[@]}" "bash '$release/scripts/deploy.sh'"

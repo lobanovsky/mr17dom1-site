@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!deploy/
+!deploy/nginx.conf
+!mr17dom1-from-tilda/
+!mr17dom1-from-tilda/**
+**/.DS_Store
+
